@@ -1,22 +1,70 @@
 import mysql.connector
 from mysql.connector import Error
+import os
+from urllib.parse import urlparse
+from dotenv import load_dotenv
+from werkzeug.security import generate_password_hash
 
-db_config = {
-    'host': 'localhost',
-    'user': 'root',
-    'password': '0402'
+# Load .env (if present) so local DB config can be set globally
+load_dotenv()
+
+
+def read_env(*names, default=None):
+    for name in names:
+        value = os.getenv(name)
+        if value not in (None, ""):
+            return value
+    return default
+
+
+def read_int_env(*names, default=3306):
+    value = read_env(*names, default=str(default))
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def read_db_config():
+    database_url = read_env('DATABASE_URL')
+    if database_url:
+        parsed = urlparse(database_url)
+        return {
+            'host': parsed.hostname or 'localhost',
+            'port': parsed.port or 3306,
+            'user': parsed.username or 'root',
+            'password': parsed.password or '',
+            'database': (parsed.path or '/mediflow_db').lstrip('/') or 'mediflow_db',
+        }
+
+    return {
+        'host': read_env('MYSQLHOST', 'DB_HOST', default='localhost'),
+        'port': read_int_env('MYSQLPORT', 'DB_PORT', default=3306),
+        'user': read_env('MYSQLUSER', 'DB_USER', default='root'),
+        'password': read_env('MYSQLPASSWORD', 'DB_PASSWORD', default='0402'),
+        'database': read_env('MYSQLDATABASE', 'DB_NAME', default='mediflow_db')
+    }
+
+# Use root connection config (no database) for initial creation
+_db_config = read_db_config()
+root_db_config = {
+    'host': _db_config['host'],
+    'port': _db_config['port'],
+    'user': _db_config['user'],
+    'password': _db_config['password'],
 }
 
 def setup_database():
     try:
-        connection = mysql.connector.connect(**db_config)
+        connection = mysql.connector.connect(**root_db_config)
         cursor = connection.cursor()
         
         # Create Database
-        cursor.execute("CREATE DATABASE IF NOT EXISTS mediflow_db")
-        print("✓ Database 'mediflow_db' checked/created.")
+        db_name = _db_config.get('database', read_env('MYSQLDATABASE', 'DB_NAME', default='mediflow_db'))
+        cursor.execute(f"CREATE DATABASE IF NOT EXISTS {db_name}")
+        print(f"✓ Database '{db_name}' checked/created.")
         
-        cursor.execute("USE mediflow_db")
+        cursor.execute(f"USE {db_name}")
         
         # 1. Create Tables with all required columns
         # Users Table
@@ -197,6 +245,19 @@ def setup_database():
             ]
             cursor.executemany("INSERT INTO doctors (name, specialization, hospital_id) VALUES (%s, %s, %s)", doctors_data)
             print("✓ Seeded sample hospitals and doctors data.")
+
+        connection.commit()
+        # Seed a demo user if none exists
+        cursor.execute("SELECT COUNT(*) FROM users")
+        try:
+            user_count = cursor.fetchone()[0]
+        except Exception:
+            user_count = 0
+
+        if user_count == 0:
+            demo_pass = generate_password_hash('password123')
+            cursor.execute("INSERT INTO users (name, phone, password) VALUES (%s, %s, %s)", ("Demo User", "9999999999", demo_pass))
+            print("✓ Seeded demo user (phone: 9999999999 / password: password123)")
 
         connection.commit()
         print("\nAll systems ready! Run 'python app.py' to start the backend.")

@@ -2,17 +2,56 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import mysql.connector
 from mysql.connector import Error
+import os
+from urllib.parse import urlparse
+from dotenv import load_dotenv
+from werkzeug.security import generate_password_hash, check_password_hash
+
+# Load .env into environment
+load_dotenv()
+
+
+def read_env(*names, default=None):
+    for name in names:
+        value = os.getenv(name)
+        if value not in (None, ""):
+            return value
+    return default
+
+
+def read_int_env(*names, default=3306):
+    value = read_env(*names, default=str(default))
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def read_db_config():
+    database_url = read_env('DATABASE_URL')
+    if database_url:
+        parsed = urlparse(database_url)
+        return {
+            'host': parsed.hostname or 'localhost',
+            'port': parsed.port or 3306,
+            'user': parsed.username or 'root',
+            'password': parsed.password or '',
+            'database': (parsed.path or '/mediflow_db').lstrip('/') or 'mediflow_db',
+        }
+
+    return {
+        'host': read_env('MYSQLHOST', 'DB_HOST', default='localhost'),
+        'port': read_int_env('MYSQLPORT', 'DB_PORT', default=3306),
+        'user': read_env('MYSQLUSER', 'DB_USER', default='root'),
+        'password': read_env('MYSQLPASSWORD', 'DB_PASSWORD', default='0402'),
+        'database': read_env('MYSQLDATABASE', 'DB_NAME', default='mediflow_db')
+    }
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
 
 # Database Configuration
-db_config = {
-    'host': 'localhost',
-    'user': 'root',
-    'password': '0402',  # Updated by user
-    'database': 'mediflow_db'
-}
+db_config = read_db_config()
 
 def get_db_connection():
     try:
@@ -166,10 +205,13 @@ def signup():
         if cursor.fetchone():
             return jsonify({"error": "User with this phone number already exists"}), 409
 
+        hashed = generate_password_hash(password)
         query = "INSERT INTO users (name, phone, password) VALUES (%s, %s, %s)"
-        cursor.execute(query, (name, phone, password))
+        cursor.execute(query, (name, phone, hashed))
         connection.commit()
-        return jsonify({"success": True, "message": "Signup successful", "user": {"name": name, "phone": phone}}), 201
+        user_id = cursor.lastrowid
+        user = {"id": user_id, "name": name, "phone": phone}
+        return jsonify({"success": True, "message": "Signup successful", "user": user}), 201
     except Error as e:
         return jsonify({"error": f"Database error: {str(e)}"}), 500
     finally:
@@ -192,11 +234,13 @@ def login():
 
     try:
         cursor = connection.cursor(dictionary=True)
-        query = "SELECT id, name, phone FROM users WHERE phone = %s AND password = %s"
-        cursor.execute(query, (phone, password))
+        query = "SELECT id, name, phone, password FROM users WHERE phone = %s"
+        cursor.execute(query, (phone,))
         user = cursor.fetchone()
 
-        if user:
+        if user and check_password_hash(user.get('password', ''), password):
+            # remove password before returning
+            user.pop('password', None)
             return jsonify({"success": True, "message": "Login successful", "user": user}), 200
         else:
             return jsonify({"error": "Invalid phone number or password"}), 401
